@@ -17,6 +17,7 @@ import helmet from "helmet";
 import { tunnel } from "cloudflared";
 
 import { spawn } from 'child_process';
+import { createHash, timingSafeEqual } from 'crypto';
 import { createCustomDomainTunnel } from './integrations/cloudflare';
 
 export const app = express();
@@ -108,20 +109,40 @@ export const enableCORSRequests : (cliConfig : cliFlags) => void = async (cliCon
     app.use(cors(typeof cliConfig.cors === 'object' && cliConfig.cors));
 }
 
+/**
+ * Routers for the docs and stats UIs, the only routes reachable without the API key.
+ * Unauthenticated requests are dispatched into these routers directly and are refused
+ * if the router does not handle them, so they never reach the rest of the app.
+ */
+const docsRouter = express.Router();
+const statsRouter = express.Router();
+const publicRouters : [string, express.Router][] = [
+    ['/api-docs', docsRouter],
+    ['/swagger-stats', statsRouter],
+];
+
+const getPublicRouter = (path : string) => publicRouters.find(([prefix]) => path === prefix || path.startsWith(`${prefix}/`))?.[1];
+
+const sha256 = (value : string) => createHash('sha256').update(value).digest();
+
+export const isValidApiKey = (cliConfig : cliFlags, candidate : unknown) : boolean => {
+    if (typeof candidate !== 'string' || !candidate || cliConfig.key === undefined || cliConfig.key === null || cliConfig.key === '') return false;
+    return timingSafeEqual(sha256(candidate), sha256(String(cliConfig.key)));
+}
+
 export const setupAuthenticationLayer : (cliConfig : cliFlags) => void = (cliConfig : cliFlags) => {
     app.use((req, res, next) => {
         if (req.path === '/' && req.method === 'GET') return res.redirect('/api-docs/');
-        if (req.path.startsWith('/api-docs') || req.path.startsWith('/swagger-stats')) {
-            return next();
+        if (isValidApiKey(cliConfig, req.get('key') || req.get('api_key'))) return next();
+        if (req.path.includes('chatwoot') && isValidApiKey(cliConfig, req.query['api_key'])) return next();
+        const publicRouter = getPublicRouter(req.path);
+        if (publicRouter) {
+            return publicRouter(req, res, (err ?: any) => {
+                if (err) return next(err);
+                res.status(401).json({ error: 'unauthorised' });
+            });
         }
-        const apiKey = req.get('key') || req.get('api_key')
-        if (req.path.includes('chatwoot') && req.query['api_key'] && req.query['api_key'] == cliConfig.key) {
-            next();
-        } else if (!apiKey || apiKey !== cliConfig.key) {
-            res.status(401).json({ error: 'unauthorised' })
-        } else {
-            next()
-        }
+        res.status(401).json({ error: 'unauthorised' })
     })
 }
 
@@ -140,10 +161,11 @@ export const setupApiDocs : (cliConfig : cliFlags) => void = (cliConfig : cliFla
             }
         }
     }
-    app.use('/api-docs', (req, res, next) => {
+    docsRouter.use('/api-docs', (req, res, next) => {
         if (req.originalUrl == "/api-docs") return res.redirect('api-docs/')
         next()
     }, swaggerUi.serve, swaggerUi.setup(collections["swagger"], swOptions));
+    app.use(docsRouter);
     /**
      * Redirect to api docs if no path is specified
      */
@@ -152,7 +174,7 @@ export const setupApiDocs : (cliConfig : cliFlags) => void = (cliConfig : cliFla
 
 export const setupSwaggerStatsMiddleware : (cliConfig : cliFlags) => Promise<void> = async (cliConfig : cliFlags) => {
     const { default: swStats } = await import('swagger-stats');
-    app.use(swStats.getMiddleware({
+    statsRouter.use(swStats.getMiddleware({
         elasticsearch: process.env.elastic_url,
         elasticsearchUsername: process.env.elastic_un,
         elasticsearchPassword: process.env.elastic_pw,
@@ -169,9 +191,10 @@ export const setupSwaggerStatsMiddleware : (cliConfig : cliFlags) => Promise<voi
             }
         },
         onAuthenticate: function (req, username, password) {
-            return ((username === "admin") && (password === cliConfig.key));
+            return ((username === "admin") && isValidApiKey(cliConfig, password));
         }
     }));
+    app.use(statsRouter);
 }
 
 export const setupRefocusDisengageMiddleware : (cliConfig : cliFlags) => void = async (cliConfig : cliFlags) => {
@@ -444,7 +467,7 @@ export const setupSocketServer : (cliConfig, client : Client) => Promise<void> =
     const io = socketServerOptions ? new Server(server, socketServerOptions) : new Server(server);
     if (cliConfig.key) {
         io.use((socket, next) => {
-            if (socket.handshake.auth["apiKey"] == cliConfig.key) next()
+            if (isValidApiKey(cliConfig, socket.handshake.auth["apiKey"])) next()
             else next(new Error("Authentication error"));
         });
     }
