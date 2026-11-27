@@ -5,7 +5,7 @@ import tcpPortUsed from 'tcp-port-used';
 import { default as axios } from 'axios'
 import { cli } from './setup';
 import { collections, generateCollections } from './collections';
-import { setUpExpressApp, setupTunnel, setupMetaProcessMiddleware, setupAuthenticationLayer, setupRefocusDisengageMiddleware, setupApiDocs, setupSwaggerStatsMiddleware, setupMediaMiddleware, app, setupSocketServer, server, setupBotPressHandler, setupTwilioCompatibleWebhook, enableCORSRequests, setupChatwoot, setupHttpServer } from './server';
+import { setUpExpressApp, setupTunnel, setupMetaMiddleware, setupMetaProcessMiddleware, setupAuthenticationLayer, setupRefocusDisengageMiddleware, setupApiDocs, setupSwaggerStatsMiddleware, setupMediaMiddleware, app, setupSocketServer, server, setupBotPressHandler, setupTwilioCompatibleWebhook, enableCORSRequests, setupChatwoot, setupHttpServer } from './server';
 import { setupChatwootOutgoingMessageHandler } from './integrations/chatwoot';
 let checkUrl = (s : any) => (typeof s === "string") && isUrl(s);
 
@@ -32,8 +32,12 @@ async function start() {
     process.env.OWA_CLI = "true"
     spinner.start("Launching EASY API")
     if(cliConfig.verbose) log.info(`config: `,{cliConfig, createConfig, PORT})
+    // The IP allow-list and API key check must be installed before any route, express runs handlers in registration order
+    setupHttpServer(cliConfig)
     setUpExpressApp();
     if(cliConfig.cors) await enableCORSRequests(cliConfig);
+    if(cliConfig?.key) setupAuthenticationLayer(cliConfig)
+    setupMetaMiddleware();
     try {
         const { status, data } = await axios.post(`http://localhost:${PORT}/getConnectionState`);
         if (status === 200 && data.response === "CONNECTED") {
@@ -89,7 +93,6 @@ async function start() {
     try {
         const client = await create({ ...createConfig });
         setupMetaProcessMiddleware(client, cliConfig)
-        await setupHttpServer(cliConfig)
         if(cliConfig.autoReject){
             await client.autoReject(cliConfig.onCall)
         } else if(cliConfig.onCall) {
@@ -134,7 +137,6 @@ async function start() {
             if (cliConfig?.key) {
                 spinner.info(`Please see machine logs to see the API key`)
                 console.log(`Please use the following api key for requests as a header:\napi_key: ${cliConfig.key}`)
-                setupAuthenticationLayer(cliConfig)
             }
 
             if(cliConfig?.chatwootUrl){

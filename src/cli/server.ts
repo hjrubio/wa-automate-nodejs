@@ -25,6 +25,8 @@ export let server = http.createServer(app);
 // will be used to clean up cloudflared tunnel
 let stop;
 
+let ipFilterMiddleware;
+
 const trimChatId = (chatId : ChatId) => chatId.replace("@c.us","").replace("@g.us","")
 
 export type cliFlags = {
@@ -59,7 +61,8 @@ export const setupHttpServer = (cliConfig: cliFlags) => {
             logLevel: 'deny',
             log: true
           }
-          app.use(IpFilter(allowIps as string[], allowIpsOptions))
+          ipFilterMiddleware = IpFilter(allowIps as string[], allowIpsOptions)
+          app.use(ipFilterMiddleware)
           app.use((err, req, res, next) => {
             if (err instanceof IpDeniedError) {
               res.status(401)
@@ -100,7 +103,6 @@ export const setUpExpressApp : () => void = () => {
     app.use(robots({ UserAgent: '*', Disallow: '/' }))
     //@ts-ignore
     app.use(express.json({ limit: '99mb' })) //add the limit option so we can send base64 data through the api
-    setupMetaMiddleware();
 }
 
 export const enableCORSRequests : (cliConfig : cliFlags) => void = async (cliConfig : cliFlags) => {
@@ -183,7 +185,7 @@ export const setupRefocusDisengageMiddleware : (cliConfig : cliFlags) => void = 
     })
 }
 
-const setupMetaMiddleware = () => {
+export const setupMetaMiddleware : () => void = () => {
     /**
      * Collection getter
      */
@@ -442,6 +444,10 @@ export const setupSocketServer : (cliConfig, client : Client) => Promise<void> =
         },
     } : null
     const io = socketServerOptions ? new Server(server, socketServerOptions) : new Server(server);
+    // socket.io handles its requests on the http server directly, so express middleware never sees them
+    if (ipFilterMiddleware) {
+        io.use((socket, next) => ipFilterMiddleware(socket.request, null, next));
+    }
     if (cliConfig.key) {
         io.use((socket, next) => {
             if (socket.handshake.auth["apiKey"] == cliConfig.key) next()
